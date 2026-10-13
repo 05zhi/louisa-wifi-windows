@@ -1,0 +1,50 @@
+name: Weekly store data proposal
+on:
+  schedule:
+    - cron: '23 1 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  stores:
+    runs-on: ubuntu-latest
+    outputs:
+      build-ref: ${{ steps.propose.outputs.build-ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Fetch and validate
+        run: |
+          python scripts/fetch_stores.py
+          python scripts/test_stores.py
+      - name: Propose validated data changes
+        id: propose
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if git diff --quiet -- data/stores.json; then exit 0; fi
+          branch=automation/store-data
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo 'Existing store update branch needs review; preserving it.'
+            echo "build-ref=$branch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git switch -c "$branch"
+          git add data/stores.json
+          git commit -m 'Update validated Louisa store data'
+          git push origin "$branch"
+          gh pr create --head "$branch" --base main --title 'Update validated Louisa store data' --body-file .github/store-update-notes.md
+          echo "build-ref=$branch" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: stores
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.stores.outputs.build-ref }}
+    permissions:
+      contents: read
