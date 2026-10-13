@@ -8,15 +8,16 @@ Environment: Microsoft Windows 11 Home x64, build `10.0.26200`; .NET SDK `10.0.4
 |---|---|
 | Release WPF/Core/Windows build | Pass, zero warnings and errors |
 | Python store data tests | 4 pass; normalization, phone rules, parser, malformed data and disappearance guard |
-| Core behavior tests | 13 pass; existing Wi-Fi protection, verified-only learning, legacy identity migration, wrong BSSID, cooldown/manual bypass, stale location, trigger coalescing, manual priority, cancellation, external network changes, permission retry blocking and midnight/sleep statistics |
-| Windows integration tests | 16 pass; native struct sizes/offsets, profile XML escaping/manual mode, current-user DPAPI, encrypted round-trip, corruption recovery, atomic writes, scoped deletion and version ordering |
+| Core behavior tests | 14 pass; existing Wi-Fi protection, verified-only learning, legacy identity migration, wrong BSSID, cooldown/manual bypass, overall deadline cooldown, stale location, trigger coalescing, manual priority, cancellation, external network changes, permission retry blocking and midnight/sleep statistics |
+| Windows integration tests | 21 pass; native struct sizes/offsets, profile XML escaping/manual mode, current-user DPAPI, encrypted round-trip, corruption recovery, atomic writes, scoped deletion, version ordering, verified download, checksum mismatch cleanup, untrusted source rejection, rate limits and release selection |
 | Embedded data validation | Pass, 519 stores; 45 lack coordinates but remain searchable |
 | Native WLAN client / adapter enumeration | Pass, AX211 reported connected; no network change made |
 | Framework-dependent WPF launch/render/exit | Pass, isolated `--smoke` exits 0; all store columns rendered; screenshot reviewed |
 | Read-only native current-connection query | Pass, one existing Wi-Fi connection; no identifiers exported |
 | Self-contained ZIP and installer | Pass, bundled application launches and exits 0 without system .NET 10 |
 | Installer install/upgrade/uninstall | Pass in an isolated workspace installation; install/reinstall exit 0, unrelated sentinel preserved, uninstall exit 0, executable/uninstall registry/startup value/shortcuts removed |
-| GitHub CI/Release | To be recorded after initial publication |
+| GitHub CI | Pass on hosted Windows runner; [initial full packaging validation](https://github.com/05zhi/louisa-wifi-windows/actions/runs/38433788122). Final version-tag workflow repeats all 39 tests before release publication. |
+| GitHub Release | Generated only after the matching `v0.1.0-preview.1` tag build succeeds; [release page](https://github.com/05zhi/louisa-wifi-windows/releases/tag/v0.1.0-preview.1) and [workflow history](https://github.com/05zhi/louisa-wifi-windows/actions/workflows/release.yml) record the final outcome. |
 
 The test programs are executable assertion suites, run by `scripts/build.ps1`; `dotnet test` alone does not run them. They do not connect to an AP, edit the login-startup registry or modify system privacy settings. DPAPI tests use unique temporary directories and clear those directories afterward.
 
@@ -41,5 +42,5 @@ Use [HARDWARE-TESTS.md](HARDWARE-TESTS.md) to record these. This is a preview re
 | M1 Native Wi-Fi prototype | Implemented; adapter enumeration and read-only state verified; controlled AP acceptance pending |
 | M2 coordinator | Implemented and core behavior tested; active wireless tests pending |
 | M3 desktop/storage/statistics | Implemented, build/render/DPAPI/storage tested; real sign-in and power transitions pending |
-| M4 packaging/update/CI | Implemented; local install/reinstall/uninstall verified; future-version update and hosted CI verification pending |
-| M5 GitHub delivery | Pending initial publish |
+| M4 packaging/update/CI | Implemented; local install/reinstall/uninstall and hosted CI verified; future-version installer handoff remains a manual hardware acceptance item |
+| M5 GitHub delivery | [Repository](https://github.com/05zhi/louisa-wifi-windows) created; matching version-tag workflow gates release artifacts on all tests |

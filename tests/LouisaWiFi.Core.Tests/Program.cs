@@ -99,6 +99,17 @@ await Test("permission denial blocks further auto work until explicitly re-enabl
     await c.RunAutomaticAsync(); await c.RunAutomaticAsync(); Assert(denied.Calls == 1);
     c.AutoEnabled = false; c.AutoEnabled = true; await c.RunAutomaticAsync(); Assert(denied.Calls == 2);
 });
+await Test("overall deadline stops pending connection and applies cooldown", async () =>
+{
+    var wifi = new FakeWifi { Block = true };
+    var c = new ConnectionCoordinator(wifi, new FakeLocation(new(25.03, 121.56, 20, clock.GetUtcNow())), new FakeLearning(), catalog, clock,
+        new ConnectionLimits(TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(10))) { AutoEnabled = true };
+    await c.RunAutomaticAsync(); Assert(wifi.Attempts == 1 && c.Status.State == ConnectionState.Failed);
+    await c.RunAutomaticAsync();
+    // One untouched AP remains eligible; the timed-out AP itself must not be retried.
+    Assert(wifi.Attempts == 2);
+    await c.RunAutomaticAsync(); Assert(wifi.Attempts == 2 && c.Status.State == ConnectionState.Cooldown);
+});
 Console.WriteLine($"{passed} core tests passed");
 
 sealed class FakeClock : TimeProvider { public override DateTimeOffset GetUtcNow() => new(2026, 10, 14, 0, 0, 0, TimeSpan.Zero); }
