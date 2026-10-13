@@ -78,7 +78,7 @@ Windows 11 的 Wi-Fi 掃描、BSSID 與部分連線查詢可能需要精確定�
 ./LouisaWiFi.exe --diagnose --output ./diagnostics.json
 ```
 
-CI／Release／門市更新流程位於 `.github/workflows/`。推送 `v*` tag 時先驗證 tag 與程式版本一致，完成測試封裝後才發布。每週門市更新發出 PR，通過 CI 並合併後需調整版本與發 tag 才會產生新版下載；不會以排程直接發布未審查門市資料。空資料、超過 15% 門市消失及格式錯誤都會停止更新並保留現有資料。
+CI／Release／門市更新流程位於 `.github/workflows/`。推送 `v*` tag 時先驗證 tag 與程式版本一致，完成測試封裝後才發布。每週門市更新會產出 `validated-store-data` 與包含新資料的 Windows 測試包，採唯讀 repository 權限。維護者審閱資料、將 `stores.json` 提交後，調整版本並發 tag 才會產生新版 Release；排程不會直接修改原始碼或發布。空資料、超過 15% 門市消失及格式錯誤都會停止更新並保留現有資料。
 
 ```powershell
 python scripts/fetch_stores.py --validate
