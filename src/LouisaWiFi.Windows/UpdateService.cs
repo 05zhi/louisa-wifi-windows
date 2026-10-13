@@ -6,11 +6,12 @@ using System.Text.RegularExpressions;
 namespace LouisaWiFi.Windows;
 
 public sealed record ReleaseInfo(string Tag, Uri Page, Uri Installer, Uri Checksums, string InstallerName);
-public sealed class UpdateService
+public sealed class UpdateService(HttpClient? client = null)
 {
     public const string Repository = "05zhi/louisa-wifi-windows";
     public const string CurrentVersion = "0.1.0-preview.1";
     private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(45), DefaultRequestHeaders = { { "User-Agent", "LouisaWiFi-Windows/" + CurrentVersion } } };
+    private HttpClient Http => client ?? Client;
     public static int CompareVersions(string left, string right)
     {
         static (Version V, string[] Pre) Parse(string tag)
@@ -37,7 +38,7 @@ public sealed class UpdateService
     }
     public async Task<ReleaseInfo?> CheckAsync(CancellationToken token)
     {
-        using var response = await Client.GetAsync("https://api.github.com/repos/" + Repository + "/releases?per_page=10", token);
+        using var response = await Http.GetAsync("https://api.github.com/repos/" + Repository + "/releases?per_page=10", token);
         if ((int)response.StatusCode == 403 || (int)response.StatusCode == 429) throw new InvalidOperationException("GitHub 暫時限制請求，請稍後再試");
         response.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
@@ -59,14 +60,14 @@ public sealed class UpdateService
     public async Task<string> DownloadAsync(ReleaseInfo release, string directory, CancellationToken token)
     {
         Validate(release.Installer.AbsoluteUri); Validate(release.Checksums.AbsoluteUri);
-        var checksums = await Client.GetStringAsync(release.Checksums, token);
+        var checksums = await Http.GetStringAsync(release.Checksums, token);
         var match = Regex.Match(checksums, @"(?m)^([a-fA-F0-9]{64})\s+\*?LouisaWiFi-Setup-x64\.exe\r?$");
         if (!match.Success) throw new InvalidDataException("更新檔案缺少 SHA256 校驗碼");
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".exe");
         try
         {
-            using var response = await Client.GetAsync(release.Installer, HttpCompletionOption.ResponseHeadersRead, token);
+            using var response = await Http.GetAsync(release.Installer, HttpCompletionOption.ResponseHeadersRead, token);
             response.EnsureSuccessStatusCode();
             if (response.Content.Headers.ContentLength > 400 * 1024 * 1024) throw new InvalidDataException("更新檔案過大");
             await using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write))

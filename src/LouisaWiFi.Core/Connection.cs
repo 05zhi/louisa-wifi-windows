@@ -18,8 +18,9 @@ public interface ILearning
 }
 public enum ConnectionState { Idle, Checking, Scanning, Selecting, Connecting, Verifying, Connected, Failed, Cooldown, Cancelled }
 public sealed record ConnectionStatus(ConnectionState State, string Message);
+public sealed record ConnectionLimits(TimeSpan Total, TimeSpan Attempt);
 
-public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearning learning, StoreCatalog catalog, TimeProvider? clock = null)
+public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearning learning, StoreCatalog catalog, TimeProvider? clock = null, ConnectionLimits? limits = null)
 {
     private readonly TimeProvider time = clock ?? TimeProvider.System;
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -47,13 +48,14 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
             epoch = generation;
         }
         if (manual) await gate.WaitAsync(); else if (!await gate.WaitAsync(0)) return;
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        using var cts = new CancellationTokenSource(limits?.Total ?? TimeSpan.FromMinutes(2));
         lock (sync)
         {
             if (epoch != generation) { gate.Release(); return; }
             active = cts;
         }
         var token = cts.Token;
+        var attemptedBssids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var current = await wifi.CurrentAsync(token);
@@ -99,8 +101,9 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
                 // A connection made outside this flow always wins, including another Louisa profile.
                 if ((await wifi.CurrentAsync(token)).Count > 0) { Report(ConnectionState.Cancelled, "偵測到現有連線，已停止後續嘗試"); return; }
                 Report(ConnectionState.Connecting, $"連線中：{attempt.Store.Name}…");
+                attemptedBssids.Add(attempt.Point.Bssid);
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                timeout.CancelAfter(TimeSpan.FromSeconds(18));
+                timeout.CancelAfter(limits?.Attempt ?? TimeSpan.FromSeconds(18));
                 WifiConnection? result;
                 try { result = await wifi.ConnectAsync(attempt.Point, attempt.Password, timeout.Token); }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested) { continue; }
@@ -118,7 +121,13 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
             foreach (var p in available) cooldown[p.Bssid] = time.GetUtcNow().AddMinutes(10);
             Report(ConnectionState.Failed, "候選密碼已用完或連線逾時，請確認門市與密碼；自動重試暫停十分鐘");
         }
-        catch (OperationCanceledException) { Report(ConnectionState.Cancelled, "已取消或超過兩分鐘，停止後續嘗試"); }
+        catch (OperationCanceledException)
+        {
+            bool userCancelled; lock (sync) userCancelled = epoch != generation;
+            if (!userCancelled) foreach (var bssid in attemptedBssids) cooldown[bssid] = time.GetUtcNow().AddMinutes(10);
+            Report(userCancelled ? ConnectionState.Cancelled : ConnectionState.Failed,
+                userCancelled ? "已取消，停止後續嘗試" : "連線流程超過兩分鐘，已停止；失敗路由器冷卻十分鐘");
+        }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             if (ex is UnauthorizedAccessException || ex is System.ComponentModel.Win32Exception { NativeErrorCode: 5 }) permissionBlocked = true;
