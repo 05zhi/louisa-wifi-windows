@@ -12,7 +12,7 @@ internal static class Program
         if (!args.Contains("--smoke")) throw new InvalidOperationException("UI tests require isolated --smoke data");
         var app = new Application();
         var store = new Store("test", "測試門市", "台北市測試地址", "02-2345-6789", 25, 121, ["23456789"]);
-        using var window = new MainWindow(new(new(1, "test", [store])));
+        using var window = new MainWindow(new(new(1, "test", [store])), new NoNetworkWifi());
         app.MainWindow = window;
         var count = 0;
         void Check(bool value, string name) { if (!value) throw new Exception(name); Console.WriteLine("PASS " + name); count++; }
@@ -53,4 +53,13 @@ internal static class Program
         foreach (var child in LogicalTreeHelper.GetChildren(parent).OfType<DependencyObject>())
             foreach (var descendant in Descendants(child)) yield return descendant;
     }
+}
+
+// UI tests must not depend on a physical adapter or initiate network operations.
+internal sealed class NoNetworkWifi : IWifi
+{
+    public event Action? Changed { add { } remove { } }
+    public Task<IReadOnlyList<WifiConnection>> CurrentAsync(CancellationToken token) => throw new InvalidOperationException("Unexpected Wi-Fi query in UI test");
+    public Task<IReadOnlyList<AccessPoint>> ScanAsync(CancellationToken token) => throw new InvalidOperationException("Unexpected Wi-Fi scan in UI test");
+    public Task<WifiConnection?> ConnectAsync(AccessPoint point, string password, CancellationToken token) => throw new InvalidOperationException("Unexpected connection in UI test");
 }

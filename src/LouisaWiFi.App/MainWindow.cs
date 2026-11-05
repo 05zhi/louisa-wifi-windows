@@ -24,7 +24,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly LocalData data;
     private readonly LocationService location;
     private readonly UsageTracker tracker = new(TimeZoneInfo.Local);
-    private readonly NativeWifi? wifi;
+    private readonly IWifi? wifi;
     private readonly ConnectionCoordinator? coordinator;
     private readonly Forms.NotifyIcon tray;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(30) };
@@ -64,7 +64,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly bool smoke = Environment.GetCommandLineArgs().Contains("--smoke");
     private HashSet<string>? nearIds;
     private readonly string? smokeRoot;
-    public MainWindow(StoreCatalog catalog)
+    public MainWindow(StoreCatalog catalog, IWifi? wifiOverride = null)
     {
         this.catalog = catalog;
         if (smoke) smokeRoot = Path.Combine(Path.GetTempPath(), "LouisaWiFi-smoke-" + Guid.NewGuid().ToString("N"));
@@ -75,7 +75,7 @@ public sealed class MainWindow : Window, IDisposable
         FontFamily = new FontFamily("Microsoft JhengHei UI"); FontSize = 13;
         Background = new SolidColorBrush(Color.FromRgb(250, 248, 244));
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        try { wifi = new(); coordinator = new(wifi, location, data, catalog); coordinator.StatusChanged += OnStatus; wifi.Changed += OnNetworkChanged; wifi.ConnectionFailed += reason => data.Log($"wlan-failure: 0x{reason:X}"); }
+        try { wifi = wifiOverride ?? new NativeWifi(); coordinator = new(wifi, location, data, catalog); coordinator.StatusChanged += OnStatus; wifi.Changed += OnNetworkChanged; if (wifi is NativeWifi native) native.ConnectionFailed += reason => data.Log($"wlan-failure: 0x{reason:X}"); }
         catch (Exception ex) { status.Text = ex.Message; }
         var layout = new DockPanel { Margin = new Thickness(24) };
         var header = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
@@ -413,7 +413,7 @@ public sealed class MainWindow : Window, IDisposable
     }
     private void Diagnose()
     {
-        var adapters = wifi == null ? "Wi-Fi 服務無法使用" : string.Join("\n", wifi.Interfaces().Select(i => $"{i.Description} / state={i.State}"));
+        var adapters = wifi is NativeWifi native ? string.Join("\n", native.Interfaces().Select(i => $"{i.Description} / state={i.State}")) : "Wi-Fi 服務無法使用";
         MessageBox.Show($"版本：{UpdateService.CurrentVersion}\n系統：{Environment.OSVersion.Version}\n門市：{catalog.Stores.Count} / {catalog.Dataset.Version}\n定位：{LocationText(location.State)}\n{adapters}\n\n診斷不包含密碼、位置或 BSSID。", "診斷資訊");
     }
     private void ClearData()
@@ -460,7 +460,7 @@ public sealed class MainWindow : Window, IDisposable
         if (disposed) return; disposed = true;
         timer.Stop(); lifetime.Cancel(); debounce.Cancel();
         SystemEvents.PowerModeChanged -= PowerChanged;
-        if (wifi != null) { wifi.Changed -= OnNetworkChanged; wifi.Dispose(); }
+        if (wifi != null) { wifi.Changed -= OnNetworkChanged; (wifi as IDisposable)?.Dispose(); }
         tray.Dispose(); debounce.Dispose(); lifetime.Dispose();
         if (smokeRoot != null && Directory.Exists(smokeRoot)) Directory.Delete(smokeRoot, true);
     }
