@@ -6,6 +6,7 @@ public sealed record LearnedRouter(string StoreId, string StoreName, string Addr
 public interface IWifi
 {
     event Action? Changed;
+    uint? LastFailureReason => null;
     Task<IReadOnlyList<WifiConnection>> CurrentAsync(CancellationToken token);
     Task<IReadOnlyList<AccessPoint>> ScanAsync(CancellationToken token);
     Task<WifiConnection?> ConnectAsync(AccessPoint point, string password, CancellationToken token);
@@ -100,10 +101,10 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
                 token.ThrowIfCancellationRequested();
                 // A connection made outside this flow always wins, including another Louisa profile.
                 if ((await wifi.CurrentAsync(token)).Count > 0) { Report(ConnectionState.Cancelled, "偵測到現有連線，已停止後續嘗試"); return; }
-                Report(ConnectionState.Connecting, $"連線中：{attempt.Store.Name}…");
+                Report(ConnectionState.Connecting, $"連線中：{attempt.Store.Name}（嘗試 {Array.IndexOf(tries, attempt) + 1}/{tries.Length}）…");
                 attemptedBssids.Add(attempt.Point.Bssid);
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                timeout.CancelAfter(limits?.Attempt ?? TimeSpan.FromSeconds(18));
+                timeout.CancelAfter(limits?.Attempt ?? TimeSpan.FromSeconds(25));
                 WifiConnection? result;
                 try { result = await wifi.ConnectAsync(attempt.Point, attempt.Password, timeout.Token); }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested) { continue; }
@@ -120,7 +121,8 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
                 return;
             }
             foreach (var p in available) cooldown[p.Bssid] = time.GetUtcNow().AddMinutes(10);
-            Report(ConnectionState.Failed, "候選密碼已用完或連線逾時，請確認門市與密碼；自動重試暫停十分鐘");
+            Report(ConnectionState.Failed, "候選密碼未能連線，請確認門市或使用店內提供的密碼；自動重試暫停十分鐘" +
+                (wifi.LastFailureReason is uint reason ? $"（Windows 原因 0x{reason:X}）" : ""));
         }
         catch (OperationCanceledException)
         {

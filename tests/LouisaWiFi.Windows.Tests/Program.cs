@@ -19,6 +19,23 @@ Check(Marshal.OffsetOf<Native.BssEntry>(nameof(Native.BssEntry.IeOffset)).ToInt3
 Check(Marshal.SizeOf<Native.ConnectionNotification>() == 568 &&
     Marshal.OffsetOf<Native.ConnectionNotification>(nameof(Native.ConnectionNotification.Reason)).ToInt32() == 560,
     "WLAN connection notification header layout");
+var failed = new ConnectionAttempt();
+failed.Observe(9, true, 0); failed.Observe(10, true, 163851); failed.Observe(21, true, 0);
+Check(!await failed.Completion.Task && failed.FailureReason == 163851 && !failed.ExternalChange,
+    "failed completion followed by disconnect remains retryable");
+var pending = new ConnectionAttempt();
+pending.Observe(10, true, 0); pending.Observe(21, true, 0);
+Check(!pending.Completion.Task.IsCompleted, "stale terminal notifications before start are ignored");
+pending.Observe(9, true, 0);
+Check(!pending.Settled.Task.IsCompleted, "pending attempt is not safe to replace before terminal notification");
+pending.Observe(10, true, 229377);
+Check(pending.Settled.Task.IsCompleted && !await pending.Completion.Task, "cancelled WLAN request drains on terminal failure");
+var external = new ConnectionAttempt(); external.Observe(9, true, 0); external.Observe(9, false, 0);
+Check(external.ExternalChange && external.Completion.Task.IsCanceled, "external connection stops retries");
+var manualDisconnect = new ConnectionAttempt(); manualDisconnect.Observe(9, true, 0); manualDisconnect.Observe(21, true, 0);
+Check(manualDisconnect.ExternalChange && manualDisconnect.Completion.Task.IsCanceled, "manual disconnect during pending attempt stops retries");
+var success = new ConnectionAttempt(); success.Observe(9, true, 0); success.Observe(10, true, 0);
+Check(await success.Completion.Task && success.FailureReason == null, "successful temporary connection is accepted");
 var password = "test<&>12345";
 var request = NativeWifi.TemporaryConnectionParameters(password, 0);
 var xml = XElement.Parse(request.Profile);

@@ -65,7 +65,7 @@ public sealed class MainWindow : Window, IDisposable
         FontFamily = new FontFamily("Microsoft JhengHei UI"); FontSize = 13;
         Background = new SolidColorBrush(Color.FromRgb(250, 248, 244));
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        try { wifi = new(); coordinator = new(wifi, location, data, catalog); coordinator.StatusChanged += OnStatus; wifi.Changed += OnNetworkChanged; }
+        try { wifi = new(); coordinator = new(wifi, location, data, catalog); coordinator.StatusChanged += OnStatus; wifi.Changed += OnNetworkChanged; wifi.ConnectionFailed += reason => data.Log($"wlan-failure: 0x{reason:X}"); }
         catch (Exception ex) { status.Text = ex.Message; }
         var layout = new DockPanel { Margin = new Thickness(24) };
         var header = new StackPanel { Margin = new Thickness(0, 0, 0, 20) };
@@ -180,7 +180,7 @@ public sealed class MainWindow : Window, IDisposable
     {
         status.Text = change.Message;
         tray.Text = change.Message.Length > 60 ? change.Message[..60] : change.Message;
-        // Log only enum states. Passwords, positions, SSIDs and BSSIDs never enter logs.
+        // Log only states and native reason codes, never passwords, positions or router IDs.
         data.Log("connection-state: " + change.State);
         if (change.State is ConnectionState.Connected or ConnectionState.Failed && !IsVisible)
         { tray.BalloonTipTitle = "Louisa Wi-Fi"; tray.BalloonTipText = change.Message; tray.ShowBalloonTip(4000); }

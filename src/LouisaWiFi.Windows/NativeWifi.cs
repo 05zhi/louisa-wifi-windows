@@ -17,6 +17,8 @@ public sealed class NativeWifi : IWifi, IDisposable
     private readonly object eventLock = new();
     private event Action<Native.Notification>? Notification;
     public event Action? Changed;
+    public event Action<uint>? ConnectionFailed;
+    public uint? LastFailureReason { get; private set; }
     private bool disposed;
     public NativeWifi()
     {
@@ -167,33 +169,14 @@ public sealed class NativeWifi : IWifi, IDisposable
         var id = point.InterfaceId;
         nint desired = 0;
         var completed = false;
-        var stoppedByUser = false;
-        var sawStart = false;
-        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        LastFailureReason = null;
+        var attempt = new ConnectionAttempt();
         void OnConnect(Native.Notification n)
         {
-            if (n.Interface != point.InterfaceId || n.Code is not (9 or 10 or 21) ||
+            if (n.Source != 8 || n.Interface != point.InterfaceId || n.Code is not (9 or 10 or 21) ||
                 n.Data == 0 || n.Size < Marshal.SizeOf<Native.ConnectionNotification>()) return;
-
             var details = Marshal.PtrToStructure<Native.ConnectionNotification>(n.Data);
-            var matches = IsTemporaryLouisaConnection(details.Mode, details.Profile, details.Ssid.Text);
-            if (n.Code == 9 && matches)
-            {
-                sawStart = true;
-                return;
-            }
-            if (n.Code == 10 && matches && sawStart)
-            {
-                // The final notification can report failure even though WlanConnect returned success.
-                done.TrySetResult(details.Reason == 0);
-                return;
-            }
-            if ((n.Code == 9 && !matches) || (n.Code == 10 && !matches && details.Reason == 0) ||
-                (n.Code == 21 && matches && sawStart))
-            {
-                stoppedByUser = true;
-                done.TrySetCanceled();
-            }
+            attempt.Observe(n.Code, IsTemporaryLouisaConnection(details.Mode, details.Profile, details.Ssid.Text), details.Reason);
         }
         try
         {
@@ -206,8 +189,13 @@ public sealed class NativeWifi : IWifi, IDisposable
             var parameters = TemporaryConnectionParameters(password, desired);
             lock (eventLock) Notification += OnConnect;
             Check(Native.WlanConnect(handle, ref id, ref parameters, 0));
-            var succeeded = await done.Task.WaitAsync(token);
-            if (!succeeded) return null;
+            var succeeded = await attempt.Completion.Task.WaitAsync(token);
+            if (!succeeded)
+            {
+                LastFailureReason = attempt.FailureReason;
+                if (LastFailureReason is uint reason) ConnectionFailed?.Invoke(reason);
+                return null;
+            }
             token.ThrowIfCancellationRequested();
             var current = (await CurrentAsync(token)).FirstOrDefault(c =>
                 c.InterfaceId == id && c.IsTemporary && c.Profile == LouisaSsid && c.Ssid == LouisaSsid);
@@ -215,17 +203,31 @@ public sealed class NativeWifi : IWifi, IDisposable
             // A different BSSID may have accepted the same password. Keep Wi-Fi, but never learn the requested AP.
             return current?.Bssid.Equals(point.Bssid, StringComparison.OrdinalIgnoreCase) == true ? current : null;
         }
-        catch (OperationCanceledException) when (stoppedByUser && !token.IsCancellationRequested)
+        catch (OperationCanceledException) when (attempt.ExternalChange && !token.IsCancellationRequested)
         { throw new InvalidOperationException("偵測到外部連線變更或手動中斷，已停止嘗試"); }
         finally
         {
-            lock (eventLock) Notification -= OnConnect;
-            if (!completed && sawStart && !stoppedByUser &&
-                (!done.Task.IsCompletedSuccessfully || done.Task.Result) &&
-                OwnsCurrentOrPending(id, !done.Task.IsCompletedSuccessfully))
-                Native.WlanDisconnect(handle, ref id, 0);
-            if (desired != 0) Marshal.FreeHGlobal(desired);
-            operations.Release();
+            try
+            {
+                // Drain a timed-out WLAN request before reusing the same temporary profile name.
+                if (!completed && attempt.SawStart && !attempt.ExternalChange &&
+                    (!attempt.Completion.Task.IsCompletedSuccessfully || attempt.Completion.Task.Result) &&
+                    OwnsCurrentOrPending(id, !attempt.Completion.Task.IsCompleted))
+                {
+                    Check(Native.WlanDisconnect(handle, ref id, 0));
+                    if (!attempt.Completion.Task.IsCompleted)
+                    {
+                        try { await attempt.Settled.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+                        catch (TimeoutException) { throw new InvalidOperationException("Windows 尚未結束上一輪連線，已停止重試，請稍後再試"); }
+                    }
+                }
+            }
+            finally
+            {
+                lock (eventLock) Notification -= OnConnect;
+                if (desired != 0) Marshal.FreeHGlobal(desired);
+                operations.Release();
+            }
         }
     }
     private bool OwnsCurrentOrPending(Guid id, bool waitingForCompletion)

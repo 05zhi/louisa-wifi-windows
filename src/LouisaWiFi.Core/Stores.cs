@@ -55,7 +55,7 @@ public static class PasswordRules
         var first = Regex.Split(phone, @"[#轉,、/]|分機|ext", RegexOptions.IgnoreCase)[0];
         var digits = Regex.Replace(first, @"[^0-9]", "");
         if (digits.Length == 0) return [];
-        string[] candidates = digits.StartsWith("02", StringComparison.Ordinal)
+        string[] candidates = (digits.StartsWith("02", StringComparison.Ordinal) || digits.StartsWith("04", StringComparison.Ordinal) && digits.Length == 10)
             ? [digits[2..], digits, digits[1..]] : [digits[1..], digits, digits[Math.Max(0, digits.Length - 8)..]];
         return candidates.Where(IsValid).Distinct(StringComparer.Ordinal).ToArray();
     }

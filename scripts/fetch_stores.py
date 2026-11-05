@@ -30,7 +30,7 @@ def passwords(phone):
     d = re.sub(r"[^0-9]", "", first)
     if not d:
         return []
-    candidates = [d[2:], d, d[1:]] if d.startswith("02") else [d[1:], d, d[-8:]]
+    candidates = [d[2:], d, d[1:]] if d.startswith("02") or (d.startswith("04") and len(d) == 10) else [d[1:], d, d[-8:]]
     return list(dict.fromkeys(p for p in candidates if 8 <= len(p) <= 63))
 
 def coord(raw):

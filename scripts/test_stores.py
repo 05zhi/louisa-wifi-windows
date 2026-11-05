@@ -7,6 +7,9 @@ class StoresTests(unittest.TestCase):
     def test_phone_formats(self):
         self.assertEqual(f.passwords("(02)2345-8613分機12"), ["23458613", "0223458613", "223458613"])
         self.assertEqual(f.passwords("03-5555555/02-23458613"), ["35555555", "035555555"])
+        self.assertEqual(f.passwords("04-2293-0613"), ["22930613", "0422930613", "422930613"])
+        data = json.loads(f.OUT.read_text(encoding="utf-8"))
+        self.assertTrue(all(s["passwords"] == f.passwords(s["phone"]) for s in data["stores"]))
         self.assertEqual(f.passwords(""), [])
     def test_parse_missing_fields_and_coordinates(self):
         rows = list(f.parse('<h4>測試店</h4><p>電話/02-23458613</p><a rel-store-address="臺北市 信義區" rel-store-lat="bad" rel-store-lng="NaN">'))

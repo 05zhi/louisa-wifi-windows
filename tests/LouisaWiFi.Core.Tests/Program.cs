@@ -12,6 +12,7 @@ await Test("telephone formats, extension, multiple numbers and deduplication", (
 {
     Assert(PasswordRules.FromPhone("(02) 2345-8613 分機12 / 03-5555555").SequenceEqual(store.Passwords));
     Assert(PasswordRules.FromPhone("03-555-5555#12").SequenceEqual(new[] { "35555555", "035555555" }));
+    Assert(PasswordRules.FromPhone("04-2293-0613").SequenceEqual(new[] { "22930613", "0422930613", "422930613" }));
     Assert(PasswordRules.FromPhone("").Length == 0); Assert(PasswordRules.FromPhone("123").Length == 0);
     Assert(!PasswordRules.IsValid("中文中文中文中文")); return Task.CompletedTask;
 });
@@ -118,6 +119,22 @@ await Test("overall deadline stops pending connection and applies cooldown", asy
     Assert(wifi.Attempts == 2);
     await c.RunAutomaticAsync(); Assert(wifi.Attempts == 2 && c.Status.State == ConnectionState.Cooldown);
 });
+await Test("Taichung eight-digit number is attempted first and learned after verification", async () =>
+{
+    var branch = store with { Passwords = PasswordRules.FromPhone("04-2293-0613") };
+    var wifi = new FakeWifi { AcceptPassword = "22930613" };
+    var learned = new FakeLearning();
+    var c = Coordinator(wifi, learned);
+    await c.RunManualAsync(branch);
+    Assert(wifi.Attempts == 1 && learned.Values.Count == 1 && c.Status.State == ConnectionState.Connected);
+});
+await Test("failed candidate continues to the next password", async () =>
+{
+    var wifi = new FakeWifi { AcceptPassword = store.Passwords[2] };
+    var c = Coordinator(wifi, new());
+    await c.RunManualAsync(store);
+    Assert(wifi.Attempts == 5 && c.Status.State == ConnectionState.Connected);
+});
 Console.WriteLine($"{passed} core tests passed");
 
 sealed class FakeClock : TimeProvider { public override DateTimeOffset GetUtcNow() => new(2026, 10, 14, 0, 0, 0, TimeSpan.Zero); }
@@ -142,6 +159,7 @@ sealed class FakeWifi : IWifi
     public IReadOnlyList<WifiConnection> Current = [];
     public bool Success, WrongBssid, Block, SwitchToSavedProfile;
     public int Scans, Attempts, MaxActive, Active;
+    public string? AcceptPassword;
     public Action<FakeWifi>? OnAttempt;
     public TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task<IReadOnlyList<WifiConnection>> CurrentAsync(CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.FromResult(Current); }
@@ -153,7 +171,7 @@ sealed class FakeWifi : IWifi
         {
             if (Block) await Task.Delay(Timeout.Infinite, token);
             OnAttempt?.Invoke(this);
-            if (!Success) return null;
+            if (!Success && password != AcceptPassword) return null;
             var c = new WifiConnection(point.InterfaceId, "LouisaCoffee", WrongBssid ? "different" : point.Bssid, "LouisaCoffee", true);
             Current = [SwitchToSavedProfile ? c with { IsTemporary = false } : c];
             return c;
