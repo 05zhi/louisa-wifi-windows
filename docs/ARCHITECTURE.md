@@ -13,7 +13,7 @@
 
 Core targets .NET 10 and has no Windows dependency. Windows uses `wlanapi.dll`, DPAPI, current-user Run registry and Windows geolocation. App targets Windows 10 SDK 19041 API surface, while installers require Windows 11 and validation/support focus on Windows 11 x64. No service or elevated resident process.
 
-`WlanConnect` acceptance is never success. The native adapter registers ACM notifications before calling it, waits for matching profile completion, then queries the actual connection. The coordinator repeats SSID/BSSID/profile checks before learning. A random, manual, current-user profile is created per attempt; unrelated profiles are untouched. Desired BSSID list and all native memory are released deterministically; safe handle owns WLAN client lifetime, callback remains rooted.
+The native adapter calls `WlanConnect` with temporary profile XML whose display name and SSID are both `LouisaCoffee`. Windows can use this profile for the connection without adding it to saved networks. The adapter waits for a matching ACM start and successful completion, then verifies the temporary mode and actual association. The coordinator verifies SSID, BSSID, profile and connection mode again before learning. The adapter releases the BSSID list and roots its notification callback for the lifetime of the WLAN handle.
 
 Auto work is coalesced; manual work cancels older work, then waits for one semaphore. Each Wi-Fi attempt is cancellable, timed and capped by an overall two-minute budget. An externally started profile or disconnection stops further attempts. Auto never competes with any existing Wi-Fi, even without internet. AP failure cooldown is in-memory ten minutes; permissions errors require user action before auto retries.
 

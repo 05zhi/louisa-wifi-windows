@@ -16,9 +16,19 @@ Check(Marshal.SizeOf<Native.ConnectionAttributes>() == 604, "WLAN_CONNECTION_ATT
 Check(Marshal.SizeOf<Native.AvailableNetwork>() == 628, "WLAN_AVAILABLE_NETWORK layout");
 Check(Marshal.SizeOf<Native.BssidList>() == 20 && Marshal.OffsetOf<Native.BssidList>(nameof(Native.BssidList.Bssid)).ToInt32() == 12, "DOT11_BSSID_LIST full header size and MAC offset");
 Check(Marshal.OffsetOf<Native.BssEntry>(nameof(Native.BssEntry.IeOffset)).ToInt32() == 352, "BSS IE offset");
+Check(Marshal.SizeOf<Native.ConnectionNotification>() == 568 &&
+    Marshal.OffsetOf<Native.ConnectionNotification>(nameof(Native.ConnectionNotification.Reason)).ToInt32() == 560,
+    "WLAN connection notification header layout");
 var password = "test<&>12345";
-var xml = XDocument.Parse(NativeWifi.ProfileXml("unique-own-profile", password));
+var request = NativeWifi.TemporaryConnectionParameters(password, 0);
+var xml = XElement.Parse(request.Profile);
 XNamespace ns = "http://www.microsoft.com/networking/WLAN/profile/v1";
+Check(request.Mode == 1 && xml.Element(ns + "name")?.Value == "LouisaCoffee" &&
+    xml.Element(ns + "SSIDConfig")?.Element(ns + "SSID")?.Element(ns + "name")?.Value == "LouisaCoffee",
+    "native request uses a temporary profile with the real Wi-Fi display name and SSID");
+Check(NativeWifi.IsTemporaryLouisaConnection(1, "LouisaCoffee", "LouisaCoffee") &&
+    !NativeWifi.IsTemporaryLouisaConnection(0, "LouisaCoffee", "LouisaCoffee"),
+    "saved LouisaCoffee profile is not owned by the temporary attempt");
 Check(xml.Descendants(ns + "keyMaterial").Single().Value == password && xml.Descendants(ns + "connectionMode").Single().Value == "manual", "profile escapes XML and uses manual mode");
 var encrypted = Dpapi.Protect(Encoding.UTF8.GetBytes(password));
 Check(Encoding.UTF8.GetString(Dpapi.Unprotect(encrypted)) == password && !Encoding.UTF8.GetString(encrypted).Contains(password), "current-user DPAPI round trip");

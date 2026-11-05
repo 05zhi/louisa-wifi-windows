@@ -1,7 +1,7 @@
 namespace LouisaWiFi.Core;
 
 public sealed record AccessPoint(Guid InterfaceId, string Bssid, int Signal, uint Auth = 7, uint Cipher = 4);
-public sealed record WifiConnection(Guid InterfaceId, string Ssid, string Bssid, string Profile);
+public sealed record WifiConnection(Guid InterfaceId, string Ssid, string Bssid, string Profile, bool IsTemporary = false);
 public sealed record LearnedRouter(string StoreId, string StoreName, string Address, string Password);
 public interface IWifi
 {
@@ -111,7 +111,8 @@ public sealed class ConnectionCoordinator(IWifi wifi, ILocation location, ILearn
                 if (result == null) continue;
                 Report(ConnectionState.Verifying, "驗證實際連線…");
                 var verified = (await wifi.CurrentAsync(token)).FirstOrDefault(c => c.InterfaceId == result.InterfaceId && c.Ssid == "LouisaCoffee" &&
-                    c.Bssid.Equals(attempt.Point.Bssid, StringComparison.OrdinalIgnoreCase) && c.Profile == result.Profile);
+                    c.Bssid.Equals(attempt.Point.Bssid, StringComparison.OrdinalIgnoreCase) && c.Profile == result.Profile &&
+                    c.IsTemporary == result.IsTemporary);
                 if (verified == null) { Report(ConnectionState.Cancelled, "連線已變更，未儲存路由器資料"); return; }
                 learning.Remember(verified.Bssid, attempt.Store, attempt.Password);
                 cooldown.Remove(verified.Bssid);

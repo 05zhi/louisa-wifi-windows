@@ -9,11 +9,12 @@ namespace LouisaWiFi.Windows;
 
 public sealed class NativeWifi : IWifi, IDisposable
 {
+    private const string LouisaSsid = "LouisaCoffee";
+    private const uint TemporaryProfileMode = 1;
     private readonly WlanHandle handle;
     private readonly Native.Notify callback;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object eventLock = new();
-    private readonly HashSet<(Guid Interface, string Profile)> ownProfiles = [];
     private event Action<Native.Notification>? Notification;
     public event Action? Changed;
     private bool disposed;
@@ -73,7 +74,7 @@ public sealed class NativeWifi : IWifi, IDisposable
             try
             {
                 var c = Marshal.PtrToStructure<Native.ConnectionAttributes>(ptr);
-                if (c.State is 1 or 2) result.Add(new(id, c.Association.Ssid.Text, Mac(c.Association.Bssid), c.Profile));
+                if (c.State is 1 or 2) result.Add(new(id, c.Association.Ssid.Text, Mac(c.Association.Bssid), c.Profile, c.Mode == TemporaryProfileMode));
             }
             finally { Native.WlanFreeMemory(ptr); }
         }
@@ -111,7 +112,7 @@ public sealed class NativeWifi : IWifi, IDisposable
                         for (var i = 0; i < count; i++)
                         {
                             var b = Marshal.PtrToStructure<Native.BssEntry>(ptr + 8 + i * size);
-                            if (b.Ssid.Text == "LouisaCoffee") result.Add(new(id, Mac(b.Bssid), (int)b.Signal, security.Value.Auth, security.Value.Cipher));
+                            if (b.Ssid.Text == LouisaSsid) result.Add(new(id, Mac(b.Bssid), (int)b.Signal, security.Value.Auth, security.Value.Cipher));
                         }
                     }
                     finally { Native.WlanFreeMemory(ptr); }
@@ -131,22 +132,32 @@ public sealed class NativeWifi : IWifi, IDisposable
             for (var i = 0; i < count; i++)
             {
                 var n = Marshal.PtrToStructure<Native.AvailableNetwork>(ptr + 8 + i * Marshal.SizeOf<Native.AvailableNetwork>());
-                if (n.Ssid.Text == "LouisaCoffee" && n.Security && n.Auth == 7 && n.Cipher == 4) return (n.Auth, n.Cipher);
+                if (n.Ssid.Text == LouisaSsid && n.Security && n.Auth == 7 && n.Cipher == 4) return (n.Auth, n.Cipher);
             }
             return null;
         }
         finally { Native.WlanFreeMemory(ptr); }
     }
-    public static string ProfileXml(string name, string password)
+    internal static Native.ConnectionParameters TemporaryConnectionParameters(string password, nint desiredBssids) => new()
+    {
+        Mode = TemporaryProfileMode,
+        Profile = ProfileXml(password),
+        Desired = desiredBssids,
+        BssType = 1
+    };
+
+    private static string ProfileXml(string password)
     {
         var authentication = Element("authEncryption", Element("authentication", "WPA2PSK"), Element("encryption", "AES"), Element("useOneX", "false"));
         var key = Element("sharedKey", Element("keyType", "passPhrase"), Element("protected", "false"), Element("keyMaterial", password));
-        return new XDocument(Element("WLANProfile", Element("name", name),
-            Element("SSIDConfig", Element("SSID", Element("name", "LouisaCoffee"))),
+        return new XDocument(Element("WLANProfile", Element("name", LouisaSsid),
+            Element("SSIDConfig", Element("SSID", Element("name", LouisaSsid))),
             Element("connectionType", "ESS"), Element("connectionMode", "manual"),
             Element("MSM", Element("security", authentication, key)))).ToString();
     }
     private static XElement Element(string name, params object[] content) => new(XName.Get(name, "http://www.microsoft.com/networking/WLAN/profile/v1"), content);
+    internal static bool IsTemporaryLouisaConnection(uint mode, string profile, string ssid) =>
+        mode == TemporaryProfileMode && profile == LouisaSsid && ssid == LouisaSsid;
 
     public async Task<WifiConnection?> ConnectAsync(AccessPoint point, string password, CancellationToken token)
     {
@@ -154,44 +165,52 @@ public sealed class NativeWifi : IWifi, IDisposable
         if (point.Auth != 7 || point.Cipher != 4) throw new InvalidOperationException("首版僅支援 WPA2-Personal / AES 網路");
         await operations.WaitAsync(token);
         var id = point.InterfaceId;
-        var name = "LouisaWiFi-" + Guid.NewGuid().ToString("N");
         nint desired = 0;
         var completed = false;
         var stoppedByUser = false;
-        var started = false;
+        var sawStart = false;
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnConnect(Native.Notification n)
         {
-            if (n.Interface != point.InterfaceId) return;
-            if (n.Code is 9 or 10 or 11 && n.Data != 0 && n.Size >= 520)
+            if (n.Interface != point.InterfaceId || n.Code is not (9 or 10 or 21) ||
+                n.Data == 0 || n.Size < Marshal.SizeOf<Native.ConnectionNotification>()) return;
+
+            var details = Marshal.PtrToStructure<Native.ConnectionNotification>(n.Data);
+            var matches = IsTemporaryLouisaConnection(details.Mode, details.Profile, details.Ssid.Text);
+            if (n.Code == 9 && matches)
             {
-                // WLAN_CONNECTION_NOTIFICATION_DATA profile starts after its 4-byte mode.
-                var profile = Marshal.PtrToStringUni(n.Data + 4, 256)?.TrimEnd('\0');
-                if (profile != name) { stoppedByUser = true; done.TrySetCanceled(); return; }
-                if (n.Code == 10) done.TrySetResult(true);
-                if (n.Code == 11) done.TrySetResult(false);
+                sawStart = true;
+                return;
             }
-            if (n.Code == 21 && started) { stoppedByUser = true; done.TrySetCanceled(); }
+            if (n.Code == 10 && matches && sawStart)
+            {
+                // The final notification can report failure even though WlanConnect returned success.
+                done.TrySetResult(details.Reason == 0);
+                return;
+            }
+            if ((n.Code == 9 && !matches) || (n.Code == 10 && !matches && details.Reason == 0) ||
+                (n.Code == 21 && matches && sawStart))
+            {
+                stoppedByUser = true;
+                done.TrySetCanceled();
+            }
         }
         try
         {
             token.ThrowIfCancellationRequested();
-            // Do not overwrite an existing user profile. Random per-attempt names are registered for cleanup.
-            Check(Native.WlanSetProfile(handle, ref id, 2, ProfileXml(name, password), null, false, 0, out _));
-            ownProfiles.Add((id, name));
             // NDIS_OBJECT_HEADER + number/total counts + one DOT11_MAC_ADDRESS.
             var mac = Convert.FromHexString(point.Bssid.Replace(":", ""));
             var bssidList = new Native.BssidList { Type = 0x80, Revision = 1, Size = (ushort)Marshal.SizeOf<Native.BssidList>(), Count = 1, Total = 1, Bssid = mac };
             desired = Marshal.AllocHGlobal(Marshal.SizeOf<Native.BssidList>());
             Marshal.StructureToPtr(bssidList, desired, false);
-            var parameters = new Native.ConnectionParameters { Mode = 0, Profile = name, Desired = desired, BssType = 1 };
+            var parameters = TemporaryConnectionParameters(password, desired);
             lock (eventLock) Notification += OnConnect;
             Check(Native.WlanConnect(handle, ref id, ref parameters, 0));
-            started = true;
             var succeeded = await done.Task.WaitAsync(token);
             if (!succeeded) return null;
             token.ThrowIfCancellationRequested();
-            var current = (await CurrentAsync(token)).FirstOrDefault(c => c.InterfaceId == id && c.Profile == name && c.Ssid == "LouisaCoffee");
+            var current = (await CurrentAsync(token)).FirstOrDefault(c =>
+                c.InterfaceId == id && c.IsTemporary && c.Profile == LouisaSsid && c.Ssid == LouisaSsid);
             completed = current != null;
             // A different BSSID may have accepted the same password. Keep Wi-Fi, but never learn the requested AP.
             return current?.Bssid.Equals(point.Bssid, StringComparison.OrdinalIgnoreCase) == true ? current : null;
@@ -201,24 +220,25 @@ public sealed class NativeWifi : IWifi, IDisposable
         finally
         {
             lock (eventLock) Notification -= OnConnect;
-            if (!completed)
-            {
-                // Disconnect only a pending/active connection owned by this exact profile.
-                if (started && !stoppedByUser && OwnsCurrentOrPending(id, name)) Native.WlanDisconnect(handle, ref id, 0);
-                Native.WlanDeleteProfile(handle, ref id, name, 0);
-                ownProfiles.Remove((id, name));
-            }
+            if (!completed && sawStart && !stoppedByUser &&
+                (!done.Task.IsCompletedSuccessfully || done.Task.Result) &&
+                OwnsCurrentOrPending(id, !done.Task.IsCompletedSuccessfully))
+                Native.WlanDisconnect(handle, ref id, 0);
             if (desired != 0) Marshal.FreeHGlobal(desired);
             operations.Release();
         }
     }
-    private bool OwnsCurrentOrPending(Guid id, string profile)
+    private bool OwnsCurrentOrPending(Guid id, bool waitingForCompletion)
     {
         var code = Native.WlanQueryInterface(handle, ref id, 7, 0, out _, out var ptr, out _);
-        // Query returns invalid-state while associating; abort our still-owned pending request too.
-        if (code == 5023) return true;
+        // The caller has already seen our start and no external change. An invalid state can indicate pending association.
+        if (code == 5023) return waitingForCompletion;
         if (code != 0) return false;
-        try { return Marshal.PtrToStructure<Native.ConnectionAttributes>(ptr).Profile == profile; }
+        try
+        {
+            var current = Marshal.PtrToStructure<Native.ConnectionAttributes>(ptr);
+            return IsTemporaryLouisaConnection(current.Mode, current.Profile, current.Association.Ssid.Text);
+        }
         finally { Native.WlanFreeMemory(ptr); }
     }
     private static string Mac(byte[] bytes) => string.Join(":", bytes.Select(b => b.ToString("x2")));
@@ -227,7 +247,6 @@ public sealed class NativeWifi : IWifi, IDisposable
         if (disposed) return;
         disposed = true;
         Native.WlanRegisterNotification(handle, 0, true, null, 0, 0, out _);
-        foreach (var entry in ownProfiles) { var id = entry.Interface; Native.WlanDeleteProfile(handle, ref id, entry.Profile, 0); }
         handle.Dispose();
         GC.KeepAlive(callback);
     }
@@ -257,7 +276,9 @@ public static class Native
     }
     [StructLayout(LayoutKind.Sequential)] public struct Security { public int Enabled, OneX; public uint Auth, Cipher; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct ConnectionAttributes
-    { public int State, Mode; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Profile; public Association Association; public Security Security; }
+    { public int State; public uint Mode; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Profile; public Association Association; public Security Security; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct ConnectionNotification
+    { public uint Mode; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Profile; public Ssid Ssid; public uint BssType, SecurityEnabled, Reason, Flags; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct AvailableNetwork
     {
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Profile; public Ssid Ssid; public uint BssType, BssidCount;
@@ -279,8 +300,6 @@ public static class Native
     [DllImport("wlanapi.dll")] public static extern uint WlanGetNetworkBssList(WlanHandle handle, ref Guid id, nint ssid, uint type, [MarshalAs(UnmanagedType.Bool)] bool security, nint reserved, out nint list);
     [DllImport("wlanapi.dll")] public static extern uint WlanGetAvailableNetworkList(WlanHandle handle, ref Guid id, uint flags, nint reserved, out nint list);
     [DllImport("wlanapi.dll")] public static extern uint WlanRegisterNotification(WlanHandle handle, uint source, [MarshalAs(UnmanagedType.Bool)] bool ignoreDuplicate, Notify? callback, nint context, nint reserved, out uint previous);
-    [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)] public static extern uint WlanSetProfile(WlanHandle handle, ref Guid id, uint flags, string xml, string? security, [MarshalAs(UnmanagedType.Bool)] bool overwrite, nint reserved, out uint reason);
     [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)] public static extern uint WlanConnect(WlanHandle handle, ref Guid id, ref ConnectionParameters parameters, nint reserved);
     [DllImport("wlanapi.dll")] public static extern uint WlanDisconnect(WlanHandle handle, ref Guid id, nint reserved);
-    [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)] public static extern uint WlanDeleteProfile(WlanHandle handle, ref Guid id, string name, nint reserved);
 }

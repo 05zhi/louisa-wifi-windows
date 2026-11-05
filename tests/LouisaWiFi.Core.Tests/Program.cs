@@ -49,6 +49,14 @@ await Test("wrong actual BSSID is never learned", async () =>
     var wifi = new FakeWifi { Success = true, WrongBssid = true }; var learned = new FakeLearning();
     await Coordinator(wifi, learned).RunManualAsync(store); Assert(learned.Values.Count == 0);
 });
+await Test("a same-name saved profile replacing the temporary connection is not learned", async () =>
+{
+    var wifi = new FakeWifi { Success = true, SwitchToSavedProfile = true };
+    var learned = new FakeLearning();
+    var coordinator = Coordinator(wifi, learned);
+    await coordinator.RunManualAsync(store);
+    Assert(wifi.Attempts == 1 && learned.Values.Count == 0 && coordinator.Status.State == ConnectionState.Cancelled);
+});
 await Test("failed passwords cool down, manual selection bypasses cooldown", async () =>
 {
     var wifi = new FakeWifi(); var c = Coordinator(wifi, new(), new(25.03, 121.56, 20, clock.GetUtcNow()));
@@ -132,7 +140,7 @@ sealed class FakeWifi : IWifi
 {
     public event Action? Changed { add { } remove { } }
     public IReadOnlyList<WifiConnection> Current = [];
-    public bool Success, WrongBssid, Block;
+    public bool Success, WrongBssid, Block, SwitchToSavedProfile;
     public int Scans, Attempts, MaxActive, Active;
     public Action<FakeWifi>? OnAttempt;
     public TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -146,8 +154,9 @@ sealed class FakeWifi : IWifi
             if (Block) await Task.Delay(Timeout.Infinite, token);
             OnAttempt?.Invoke(this);
             if (!Success) return null;
-            var c = new WifiConnection(point.InterfaceId, "LouisaCoffee", WrongBssid ? "different" : point.Bssid, "own-profile");
-            Current = [c]; return c;
+            var c = new WifiConnection(point.InterfaceId, "LouisaCoffee", WrongBssid ? "different" : point.Bssid, "LouisaCoffee", true);
+            Current = [SwitchToSavedProfile ? c with { IsTemporary = false } : c];
+            return c;
         }
         finally { Active--; }
     }
