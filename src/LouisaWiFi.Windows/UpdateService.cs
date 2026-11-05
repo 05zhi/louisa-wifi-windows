@@ -9,7 +9,7 @@ public sealed record ReleaseInfo(string Tag, Uri Page, Uri Installer, Uri Checks
 public sealed class UpdateService(HttpClient? client = null)
 {
     public const string Repository = "05zhi/louisa-wifi-windows";
-    public const string CurrentVersion = "0.1.0-preview.3";
+    public const string CurrentVersion = "0.1.0-preview.4";
     private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(45), DefaultRequestHeaders = { { "User-Agent", "LouisaWiFi-Windows/" + CurrentVersion } } };
     private HttpClient Http => client ?? Client;
     public static int CompareVersions(string left, string right)

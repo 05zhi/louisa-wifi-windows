@@ -33,11 +33,21 @@ public sealed class MainWindow : Window, IDisposable
     private readonly TextBox search = new() { MinWidth = 180, Padding = new Thickness(8), Margin = new Thickness(0, 0, 8, 0) };
     private readonly ComboBox city = new() { MinWidth = 100, Margin = new Thickness(0, 0, 8, 0) };
     private readonly CheckBox known = new() { Content = "只顯示連過的門市", VerticalAlignment = VerticalAlignment.Center };
-    private readonly CheckBox automatic = new() { Content = "自動連線" };
-    private readonly CheckBox useLocation = new() { Content = "使用定位尋找附近門市（最多三家、五公里內）" };
+    private readonly CheckBox automatic = new() { Content = "沒有 Wi-Fi 連線時，自動嘗試連線" };
+    private readonly CheckBox useLocation = new() { Content = "允許本程式用定位尋找門市" };
     private readonly CheckBox login = new() { Content = "登入 Windows 時啟動" };
     private readonly DataGrid stores = new() { AutoGenerateColumns = false, IsReadOnly = true, SelectionMode = DataGridSelectionMode.Single, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column, RowHeight = 36, MinHeight = 160 };
-    private readonly TextBlock detail = Text("選擇門市查看候選密碼", 13);
+    private readonly TextBlock detail = Text("先選擇你所在的門市，再按「連線到這家店」。", 13);
+    private readonly TabControl tabs = new();
+    private readonly TextBlock locationStatus = Text("", 14, FontWeights.SemiBold);
+    private readonly TextBlock locationHint = Text("", 12);
+    private readonly TextBlock results = Text("", 12);
+    private readonly Expander passwordOptions = new() { Header = "店內密碼不同？使用自訂密碼", Margin = new Thickness(0, 4, 0, 4) };
+    private readonly TextBlock emptyResults = Text("找不到符合條件的門市。試著縮短關鍵字，或按「清除篩選」。", 14);
+    private Button connectButton = null!, cancelButton = null!, testLocationButton = null!, findNearbyButton = null!;
+    private Button savePasswordButton = null!, forgetPasswordButton = null!;
+    private bool connecting, locating, returningFromPermissions;
+    private CancellationTokenSource? locationRequest;
     private readonly PasswordBox overridePassword = new() { Width = 170, Padding = new Thickness(6), Margin = new Thickness(0, 0, 8, 0) };
     private readonly CheckBox customPassword = new() { Content = "使用自訂密碼", Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
     private readonly ComboBox years = new() { Width = 100, Margin = new Thickness(0, 0, 8, 0) };
@@ -61,19 +71,18 @@ public sealed class MainWindow : Window, IDisposable
         data = new(smokeRoot);
         tracker.Usage.AddRange(data.Load("usage.json", () => new List<UsageSlice>()).Where(u => u.Seconds is >= 0 and <= 86400 && DateOnly.TryParse(u.Date, out _)));
         location = new(() => data.Settings.UseLocation);
-        Title = "Louisa Wi-Fi for Windows"; Width = 980; Height = 740; MinWidth = 780; MinHeight = 580;
+        Title = "Louisa Wi-Fi for Windows" + (smoke ? " · UI test" : ""); Width = 1000; Height = 820; MinWidth = 820; MinHeight = 680;
         FontFamily = new FontFamily("Microsoft JhengHei UI"); FontSize = 13;
         Background = new SolidColorBrush(Color.FromRgb(250, 248, 244));
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         try { wifi = new(); coordinator = new(wifi, location, data, catalog); coordinator.StatusChanged += OnStatus; wifi.Changed += OnNetworkChanged; wifi.ConnectionFailed += reason => data.Log($"wlan-failure: 0x{reason:X}"); }
         catch (Exception ex) { status.Text = ex.Message; }
         var layout = new DockPanel { Margin = new Thickness(24) };
-        var header = new StackPanel { Margin = new Thickness(0, 0, 0, 20) };
+        var header = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
         header.Children.Add(Text("☕  Louisa Wi-Fi", 28, FontWeights.Bold));
-        header.Children.Add(Text("Windows 預覽版  ·  " + catalog.Stores.Count + " 家內建門市  ·  資料 " + catalog.Dataset.Version, 12));
         header.Children.Add(status); header.Children.Add(connection);
         DockPanel.SetDock(header, Dock.Top); layout.Children.Add(header);
-        var tabs = new TabControl(); tabs.Items.Add(new TabItem { Header = "  尋找門市  ", Content = BuildSearch() });
+        tabs.Items.Add(new TabItem { Header = "  尋找門市  ", Content = BuildSearch() });
         tabs.Items.Add(new TabItem { Header = "  連線統計  ", Content = BuildStats() });
         tabs.Items.Add(new TabItem { Header = "  設定與說明  ", Content = BuildSettings() }); layout.Children.Add(tabs); Content = layout;
         var menu = new Forms.ContextMenuStrip(); menu.Items.Add("開啟門市搜尋", null, (_, _) => Reveal());
@@ -91,54 +100,193 @@ public sealed class MainWindow : Window, IDisposable
         automatic.IsChecked = data.Settings.AutoConnect; useLocation.IsChecked = data.Settings.UseLocation;
         known.IsChecked = data.Settings.KnownOnly; login.IsChecked = data.Settings.StartAtLogin;
         if (coordinator != null) coordinator.AutoEnabled = data.Settings.AutoConnect;
-        ready = true; RefreshSearch(); RefreshStats();
+        ready = true; RefreshSearch(); RefreshStats(); RefreshLocation(); UpdateSelection();
+        Activated += async (_, _) =>
+        {
+            if (!returningFromPermissions || !ready || exiting) return;
+            returningFromPermissions = false;
+            if (data.Settings.UseLocation) await CheckLocation(false);
+        };
         Closing += (_, e) => { if (!exiting) { e.Cancel = true; Hide(); } };
         timer.Tick += async (_, _) => await Tick();
         if (!smoke) { timer.Start(); SystemEvents.PowerModeChanged += PowerChanged; _ = Tick(); }
     }
     private UIElement BuildSearch()
     {
-        var panel = new DockPanel { Margin = new Thickness(14) };
-        var top = new StackPanel { Margin = new Thickness(0, 0, 0, 12) };
-        top.Children.Add(Text("搜尋店名、地址或電話；連線功能需 Windows 允許 Wi-Fi／定位存取。", 12));
-        var row = new DockPanel { Margin = new Thickness(0, 10, 0, 6) };
-        row.Children.Add(city); row.Children.Add(known); row.Children.Add(search); top.Children.Add(row);
+        var panel = new DockPanel { Margin = new Thickness(16) };
+        var top = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+        top.Children.Add(Text("1  找到你所在的門市", 18, FontWeights.SemiBold));
+        System.Windows.Automation.AutomationProperties.SetName(search, "搜尋店名、地址或電話");
+        System.Windows.Automation.AutomationProperties.SetName(city, "縣市");
+        search.ToolTip = "搜尋店名、地址或電話";
+        var row = new DockPanel { Margin = new Thickness(0, 8, 0, 6) };
+        var searchArea = new Grid(); searchArea.Children.Add(search);
+        var searchHint = Text("搜尋店名、地址或電話", 13); searchHint.Margin = new Thickness(10, 0, 0, 0);
+        searchHint.VerticalAlignment = VerticalAlignment.Center; searchHint.IsHitTestVisible = false;
+        searchHint.Foreground = Brushes.Gray; searchArea.Children.Add(searchHint);
+        search.TextChanged += (_, _) => searchHint.Visibility = search.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        row.Children.Add(city); row.Children.Add(searchArea); top.Children.Add(row);
         city.Items.Add("所有縣市"); foreach (var c in catalog.Stores.Select(s => s.City).Where(c => c.Length > 0).Distinct().Order()) city.Items.Add(c); city.SelectedIndex = 0;
         search.TextChanged += (_, _) => RefreshSearch(); city.SelectionChanged += (_, _) => RefreshSearch();
         known.Click += (_, _) => { data.Settings.KnownOnly = known.IsChecked == true; data.SaveSettings(); RefreshSearch(); };
-        var actions = new WrapPanel(); actions.Children.Add(Button("附近門市", async () => await ShowNearby()));
-        actions.Children.Add(Button("所有門市", () => { nearIds = null; RefreshSearch(); }));
-        actions.Children.Add(Button("連線到選取門市", ConnectSelected));
-        actions.Children.Add(Button("取消目前嘗試", () => coordinator?.Cancel())); top.Children.Add(actions);
+        var actions = new WrapPanel(); actions.Children.Add(Button("尋找附近門市", async () => await ShowNearby()));
+        actions.Children.Add(Button("清除篩選", ResetFilters));
+        known.Margin = new Thickness(12, 0, 0, 0); actions.Children.Add(known); top.Children.Add(actions);
+        top.Children.Add(results);
         DockPanel.SetDock(top, Dock.Top); panel.Children.Add(top);
-        var bottom = new StackPanel { Margin = new Thickness(0, 12, 0, 0) }; bottom.Children.Add(detail);
-        var custom = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var bottom = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        bottom.Children.Add(Text("2  確認門市並連線", 18, FontWeights.SemiBold)); bottom.Children.Add(detail);
+        var custom = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
+        customPassword.Content = "改用店內提供的密碼";
+        System.Windows.Automation.AutomationProperties.SetName(overridePassword, "店內提供的 Wi-Fi 密碼");
+        customPassword.Click += (_, _) => RefreshConnectionControls();
         custom.Children.Add(customPassword); custom.Children.Add(overridePassword);
-        custom.Children.Add(Button("儲存覆寫密碼", () => { if (stores.SelectedItem is Store s) { data.SetOverride(s.Id, overridePassword.Password); detail.Text = "已加密儲存；勾選使用自訂密碼後連線。"; } }));
-        custom.Children.Add(Button("移除覆寫", () => { if (stores.SelectedItem is Store s) { data.SetOverride(s.Id, null); overridePassword.Clear(); customPassword.IsChecked = false; } }));
-        bottom.Children.Add(custom); DockPanel.SetDock(bottom, Dock.Bottom); panel.Children.Add(bottom);
+        savePasswordButton = Button("記住此店密碼", SavePassword);
+        forgetPasswordButton = Button("忘記自訂密碼", () =>
+        {
+            if (stores.SelectedItem is not Store selected) return;
+            data.SetOverride(selected.Id, null); overridePassword.Clear(); customPassword.IsChecked = false;
+            detail.Text = "已移除自訂密碼，下次會使用電話衍生密碼。"; RefreshConnectionControls();
+        });
+        custom.Children.Add(savePasswordButton); custom.Children.Add(forgetPasswordButton); passwordOptions.Content = custom; bottom.Children.Add(passwordOptions);
+        var connectActions = new WrapPanel();
+        connectButton = PrimaryButton("連線到這家店", ConnectSelected);
+        cancelButton = Button("取消連線", () => coordinator?.Cancel());
+        connectActions.Children.Add(connectButton); connectActions.Children.Add(cancelButton); bottom.Children.Add(connectActions);
+        DockPanel.SetDock(bottom, Dock.Bottom); panel.Children.Add(bottom);
         foreach (var (title, field, width) in new[] { ("門市", "Name", 2.0), ("地址", "Address", 3.0), ("電話", "Phone", 1.3) }) stores.Columns.Add(new DataGridTextColumn { Header = title, Binding = new Binding(field), Width = new DataGridLength(width, DataGridLengthUnitType.Star) });
-        stores.SelectionChanged += (_, _) => { if (stores.SelectedItem is Store s) { detail.Text = s.Name + "  ·  候選密碼：" + string.Join(" / ", s.Passwords); overridePassword.Password = data.Overrides.GetValueOrDefault(s.Id, ""); customPassword.IsChecked = overridePassword.Password.Length > 0; } };
-        panel.Children.Add(stores); return panel;
+        stores.SelectionChanged += (_, _) => UpdateSelection();
+        var list = new Grid(); list.Children.Add(stores);
+        emptyResults.HorizontalAlignment = HorizontalAlignment.Center; emptyResults.VerticalAlignment = VerticalAlignment.Center;
+        emptyResults.Margin = new Thickness(20); emptyResults.IsHitTestVisible = false; list.Children.Add(emptyResults);
+        panel.Children.Add(list); return panel;
     }
     private UIElement BuildSettings()
     {
-        var panel = new StackPanel { Margin = new Thickness(20) };
-        panel.Children.Add(Text("連線與隱私", 20, FontWeights.Bold));
-        panel.Children.Add(Text("開啟自動連線後，程式只在沒有現有 Wi-Fi 連線時嘗試 LouisaCoffee。\nWi-Fi 掃描與 BSSID 在部分 Windows 版本需要精確定位權限。\n定位僅用於尋找最近門市，設定、密碼與統計保存在此電腦。", 13));
-        foreach (var checkbox in new[] { automatic, useLocation, login }) { checkbox.Margin = new Thickness(0, 12, 0, 0); panel.Children.Add(checkbox); }
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        var locationPanel = new StackPanel();
+        locationPanel.Children.Add(Text("定位與附近門市", 20, FontWeights.SemiBold));
+        locationPanel.Children.Add(Text("定位用來找五公里內最近的三家門市。不開啟，也能手動搜尋店名。", 13));
+        useLocation.Margin = new Thickness(0, 10, 0, 8); locationPanel.Children.Add(useLocation);
+        locationPanel.Children.Add(locationStatus); locationPanel.Children.Add(locationHint);
+        var locationActions = new WrapPanel();
+        findNearbyButton = PrimaryButton("啟用定位並尋找", async () => { if (!data.Settings.UseLocation) SetLocationEnabled(true); await ShowNearby(); });
+        testLocationButton = Button("重新檢查定位", async () => await CheckLocation(false));
+        locationActions.Children.Add(findNearbyButton); locationActions.Children.Add(testLocationButton);
+        locationActions.Children.Add(Button("開啟 Windows 定位權限", () => { returningFromPermissions = true; Open("ms-settings:privacy-location"); }));
+        locationPanel.Children.Add(locationActions);
+        locationPanel.Children.Add(Text("Windows 權限與上方開關是兩回事。若連線或定位被拒，請在 Windows 開啟「位置服務」及適用的應用程式／桌面應用程式定位權限，再回來檢查。", 12));
+        panel.Children.Add(Card(locationPanel));
+        var connectionPanel = new StackPanel();
+        connectionPanel.Children.Add(Text("自動連線", 20, FontWeights.SemiBold));
+        automatic.Margin = new Thickness(0, 10, 0, 8); connectionPanel.Children.Add(automatic);
+        connectionPanel.Children.Add(Text("優先使用記住的門市路由器；開啟定位後，也能嘗試附近門市。已連上其他 Wi-Fi 或手機熱點時，不會切換網路。", 13));
+        connectionPanel.Children.Add(Text("第一次到店，建議先手動選店連線。失敗後自動重試會暫停十分鐘，仍可手動重試。", 12));
+        panel.Children.Add(Card(connectionPanel));
+        var appPanel = new StackPanel();
+        appPanel.Children.Add(Text("啟動與關閉", 20, FontWeights.SemiBold));
+        login.Margin = new Thickness(0, 10, 0, 8); appPanel.Children.Add(login);
+        appPanel.Children.Add(Text("按視窗的 × 會縮到系統匣，程式仍在執行。更新、刪除程式資料夾前，請按「完全結束程式」。", 13));
+        appPanel.Children.Add(Button("完全結束程式", Exit)); panel.Children.Add(Card(appPanel));
+        var support = new StackPanel();
+        support.Children.Add(Text("版本、說明與本機資料", 20, FontWeights.SemiBold));
+        support.Children.Add(Text($"版本 {UpdateService.CurrentVersion}  ·  {catalog.Stores.Count} 家門市  ·  門市資料 {catalog.Dataset.Version}", 12));
+        var controls = new WrapPanel();
+        controls.Children.Add(Button("檢查更新", async () => await CheckUpdate())); controls.Children.Add(Button("使用說明", () => Open("https://github.com/" + UpdateService.Repository + "#使用說明")));
+        controls.Children.Add(Button("診斷資訊", Diagnose)); support.Children.Add(controls);
+        support.Children.Add(Text("密碼加密保存在此電腦；不儲存定位座標。清除資料會移除設定、記住的路由器、自訂密碼與連線統計。", 12));
+        support.Children.Add(Button("清除本機資料…", ClearData));
+        support.Children.Add(Text("支援 WPA2-Personal／AES。連上 Wi-Fi 後，部分門市仍需完成網頁驗證。\n參考 madeyexz/louisa-wifi · MIT · 與路易莎官方無隸屬關係", 12));
+        panel.Children.Add(Card(support));
         automatic.Click += async (_, _) => { if (!ready) return; data.Settings.AutoConnect = automatic.IsChecked == true; data.SaveSettings(); autoTray.Item.Checked = data.Settings.AutoConnect; if (coordinator != null) { coordinator.AutoEnabled = data.Settings.AutoConnect; if (coordinator.AutoEnabled) await coordinator.RunAutomaticAsync(); } };
-        useLocation.Click += (_, _) => { data.Settings.UseLocation = useLocation.IsChecked == true; data.SaveSettings(); };
+        useLocation.Click += (_, _) => SetLocationEnabled(useLocation.IsChecked == true);
         login.Click += (_, _) => { StartupRegistration.Set(login.IsChecked == true); data.Settings.StartAtLogin = login.IsChecked == true; data.SaveSettings(); };
-        var controls = new WrapPanel { Margin = new Thickness(0, 16, 0, 16) };
-        controls.Children.Add(Button("開啟定位隱私設定", () => Open("ms-settings:privacy-location")));
-        controls.Children.Add(Button("檢查更新", async () => await CheckUpdate())); controls.Children.Add(Button("診斷資訊", Diagnose));
-        panel.Children.Add(controls);
-        panel.Children.Add(Text("關閉視窗會繼續在系統匣執行；請從系統匣選單選擇「結束」。\n首版支援 WPA2-Personal / AES；WPA3 與企業驗證尚未支援。\n連上 Wi-Fi 與可上網是兩個狀態，門市驗證頁不會被當成密碼錯誤。\n預覽版尚待受控 AP 與實際門市驗證。", 13));
-        panel.Children.Add(Button("清除本機設定、路由器與統計", ClearData));
-        panel.Children.Add(Button("開啟 GitHub 與下載頁", () => Open("https://github.com/" + UpdateService.Repository)));
-        panel.Children.Add(Text("參考 madeyexz/louisa-wifi 重新實作 · MIT · 與路易莎官方無隸屬關係", 12));
-        return new ScrollViewer { Content = panel };
+        return new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    }
+    public void ShowSettings() { tabs.SelectedIndex = 2; }
+    private void SetLocationEnabled(bool enabled)
+    {
+        locationRequest?.Cancel(); location.Reset();
+        data.Settings.UseLocation = enabled; useLocation.IsChecked = enabled; data.SaveSettings();
+        if (!enabled) { nearIds = null; RefreshSearch(); }
+        RefreshLocation();
+    }
+    private void RefreshLocation()
+    {
+        var enabled = data.Settings.UseLocation;
+        locationStatus.Text = !enabled ? "程式定位已關閉" : locating ? "正在取得位置，請稍候…" : location.State switch
+        {
+            LocationState.Available => "定位可用，可以尋找附近門市",
+            LocationState.Denied => "Windows 尚未允許定位存取",
+            LocationState.Disabled => "Windows 定位已關閉，或由組織管理",
+            LocationState.Unavailable => "目前無法取得足夠準確的位置",
+            _ => "程式定位已開啟，尚未檢查 Windows 權限"
+        };
+        locationHint.Text = !enabled ? "按「啟用定位並尋找」即可開始；也可以回到「尋找門市」手動搜尋。" : location.State switch
+        {
+            LocationState.Denied or LocationState.Disabled => "下一步：開啟 Windows 定位權限，調整後回到這裡重新檢查。",
+            LocationState.Unavailable => "請稍後重新檢查，或手動搜尋門市。這不一定是權限問題。",
+            LocationState.Available => "只用於附近門市排序，不會儲存定位座標。",
+            _ => "按「重新檢查定位」確認是否可用；程式不會替你更改 Windows 權限。"
+        };
+        findNearbyButton.Content = enabled ? "尋找附近門市" : "啟用定位並尋找";
+        findNearbyButton.IsEnabled = !locating; testLocationButton.IsEnabled = enabled && !locating;
+    }
+    private async Task CheckLocation(bool showNearby)
+    {
+        if (locating || !data.Settings.UseLocation) { RefreshLocation(); return; }
+        locating = true; locationRequest = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        var request = locationRequest; RefreshLocation();
+        try
+        {
+            var position = await location.LocateAsync(request.Token);
+            request.Token.ThrowIfCancellationRequested();
+            if (position == null) { ShowSettings(); return; }
+            if (showNearby)
+            {
+                nearIds = catalog.Nearest(position).Select(s => s.Id).ToHashSet();
+                city.SelectedIndex = 0; search.Clear(); known.IsChecked = false;
+                data.Settings.KnownOnly = false; data.SaveSettings(); RefreshSearch(); tabs.SelectedIndex = 0;
+                status.Text = nearIds.Count > 0 ? "已找到附近門市，請選擇你所在的店。" : "五公里內找不到門市，請按「清除篩選」再搜尋店名。";
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { locating = false; if (ReferenceEquals(locationRequest, request)) locationRequest = null; request.Dispose(); RefreshLocation(); }
+    }
+    private void ResetFilters()
+    {
+        nearIds = null; search.Clear(); city.SelectedIndex = 0; known.IsChecked = false;
+        data.Settings.KnownOnly = false; data.SaveSettings(); RefreshSearch();
+    }
+    private void UpdateSelection()
+    {
+        if (stores.SelectedItem is Store selected)
+        {
+            detail.Text = selected.Name + "  ·  電話衍生密碼：" + string.Join(" / ", selected.Passwords);
+            overridePassword.Password = data.Overrides.GetValueOrDefault(selected.Id, "");
+            customPassword.IsChecked = overridePassword.Password.Length > 0;
+        }
+        else { detail.Text = "先選擇你所在的門市，再按「連線到這家店」。"; overridePassword.Clear(); customPassword.IsChecked = false; }
+        passwordOptions.IsExpanded = customPassword.IsChecked == true;
+        RefreshConnectionControls();
+    }
+    private void RefreshConnectionControls()
+    {
+        if (connectButton == null) return;
+        var selected = stores.SelectedItem is Store;
+        connectButton.IsEnabled = selected && !connecting && coordinator != null;
+        cancelButton.IsEnabled = connecting;
+        customPassword.IsEnabled = selected && !connecting;
+        overridePassword.IsEnabled = selected && !connecting && customPassword.IsChecked == true;
+        savePasswordButton.IsEnabled = overridePassword.IsEnabled;
+        forgetPasswordButton.IsEnabled = selected && !connecting && data.Overrides.ContainsKey(((Store)stores.SelectedItem).Id);
+    }
+    private void SavePassword()
+    {
+        if (stores.SelectedItem is not Store selected) return;
+        if (!PasswordRules.IsValid(overridePassword.Password)) { detail.Text = "請輸入 8 至 63 個英數字或符號的密碼，再按記住。"; overridePassword.Focus(); return; }
+        data.SetOverride(selected.Id, overridePassword.Password); customPassword.IsChecked = true;
+        detail.Text = "已加密記住此店密碼。按「連線到這家店」開始連線。"; RefreshConnectionControls();
     }
     private UIElement BuildStats()
     {
@@ -157,17 +305,23 @@ public sealed class MainWindow : Window, IDisposable
     private void RefreshSearch()
     {
         if (!ready) return;
-        stores.ItemsSource = catalog.Search(search.Text, city.SelectedIndex > 0 ? city.SelectedItem as string : null)
+        var selectedId = (stores.SelectedItem as Store)?.Id;
+        var matches = catalog.Search(search.Text, city.SelectedIndex > 0 ? city.SelectedItem as string : null)
             .Where(s => known.IsChecked != true || data.IsKnown(s.Id)).Where(s => nearIds == null || nearIds.Contains(s.Id)).ToArray();
+        stores.ItemsSource = matches;
+        if (selectedId != null) stores.SelectedItem = matches.FirstOrDefault(s => s.Id == selectedId);
+        results.Text = (nearIds != null ? "附近門市" : "搜尋結果") + $" · {matches.Length} 家";
+        emptyResults.Visibility = matches.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
     private async Task ShowNearby()
     {
-        if (!data.Settings.UseLocation) { status.Text = "請先在設定勾選使用定位，或直接搜尋門市"; return; }
-        status.Text = "正在取得位置…";
-        var p = await location.LocateAsync(lifetime.Token);
-        if (p == null) { status.Text = "定位狀態：" + LocationText(location.State) + "；仍可手動搜尋門市"; return; }
-        nearIds = catalog.Nearest(p).Select(s => s.Id).ToHashSet(); city.SelectedIndex = 0; search.Clear(); RefreshSearch();
-        status.Text = nearIds.Count > 0 ? "已顯示五公里內最近三家門市" : "五公里內沒有有效門市資料，請搜尋所有門市";
+        if (!data.Settings.UseLocation)
+        {
+            ShowSettings(); RefreshLocation(); useLocation.Focus();
+            status.Text = "尋找附近門市需要定位。請選擇「啟用定位並尋找」，或回到搜尋手動選店。";
+            return;
+        }
+        await CheckLocation(true);
     }
     private async void ConnectSelected()
     {
@@ -179,6 +333,8 @@ public sealed class MainWindow : Window, IDisposable
     private void OnStatus(ConnectionStatus change) => Dispatcher.BeginInvoke(() =>
     {
         status.Text = change.Message;
+        connecting = change.State is ConnectionState.Checking or ConnectionState.Scanning or ConnectionState.Selecting or ConnectionState.Connecting or ConnectionState.Verifying;
+        RefreshConnectionControls(); RefreshLocation();
         tray.Text = change.Message.Length > 60 ? change.Message[..60] : change.Message;
         // Log only states and native reason codes, never passwords, positions or router IDs.
         data.Log("connection-state: " + change.State);
@@ -267,11 +423,27 @@ public sealed class MainWindow : Window, IDisposable
         if (coordinator != null) coordinator.AutoEnabled = false;
         StartupRegistration.Set(false); data.Clear(); tracker.Suspend(); tracker.Usage.Clear();
         automatic.IsChecked = false; useLocation.IsChecked = false; login.IsChecked = false; known.IsChecked = false; autoTray.Item.Checked = false;
-        overridePassword.Clear(); customPassword.IsChecked = false; RefreshSearch(); RefreshStats(); status.Text = "已清除本機資料";
+        locationRequest?.Cancel(); location.Reset(); nearIds = null;
+        overridePassword.Clear(); customPassword.IsChecked = false; RefreshSearch(); RefreshStats(); RefreshLocation(); status.Text = "已清除本機資料";
     }
     private static string LocationText(LocationState state) => state switch { LocationState.Available => "已取得有效位置", LocationState.Denied => "使用者拒絕存取", LocationState.Disabled => "系統定位關閉或受政策限制", LocationState.NotEnabled => "尚未啟用", _ => "暫時無法取得有效位置" };
     private static TextBlock Text(string value, double size, FontWeight? weight = null) => new() { Text = value, FontSize = size, FontWeight = weight ?? FontWeights.Normal, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 5), Foreground = new SolidColorBrush(Color.FromRgb(69, 45, 29)) };
     private static Button Button(string label, Action action) { var b = new Button { Content = label, Padding = new Thickness(12, 7, 12, 7), Margin = new Thickness(0, 4, 8, 4) }; b.Click += (_, _) => action(); return b; }
+    private static Border Card(UIElement content) => new()
+    {
+        Background = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(226, 219, 210)),
+        BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(18),
+        Margin = new Thickness(0, 0, 0, 14), Child = content
+    };
+    private static Button PrimaryButton(string label, Action action)
+    {
+        var button = Button(label, action); button.Background = new SolidColorBrush(Color.FromRgb(107, 65, 35));
+        var style = new Style(typeof(Button)); style.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
+        var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.DimGray)); style.Triggers.Add(disabled);
+        button.Style = style; button.FontWeight = FontWeights.SemiBold;
+        return button;
+    }
     private static void Open(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     public void Reveal() { Show(); WindowState = WindowState.Normal; Activate(); }
     public async void Exit()
@@ -279,7 +451,7 @@ public sealed class MainWindow : Window, IDisposable
         if (exiting) return;
         exiting = true; timer.Stop(); lifetime.Cancel(); coordinator?.Cancel();
         // Allow native operations to observe cancellation before closing their handle.
-        while (coordinator?.Busy == true || ticking) await Task.Delay(50);
+        while (coordinator?.Busy == true || ticking || locating) await Task.Delay(50);
         if (!smoke) data.Save("usage.json", tracker.Usage);
         Dispose(); Application.Current.Shutdown();
     }

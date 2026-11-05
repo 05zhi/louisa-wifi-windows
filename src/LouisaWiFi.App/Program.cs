@@ -26,8 +26,9 @@ internal static class Program
             if (output >= 0 && output + 1 < args.Length) File.WriteAllText(args[output + 1], text);
             return 0;
         }
-        using var mutex = new Mutex(true, @"Local\LouisaWiFi.Windows.Singleton", out var first);
-        using var activate = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\LouisaWiFi.Windows.Activate");
+        var smoke = args.Contains("--smoke");
+        using var mutex = new Mutex(true, @"Local\LouisaWiFi.Windows.Singleton" + (smoke ? ".Smoke" : ""), out var first);
+        using var activate = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\LouisaWiFi.Windows.Activate" + (smoke ? ".Smoke" : ""));
         if (!first) { activate.Set(); return 0; }
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         application.DispatcherUnhandledException += (_, e) =>
@@ -49,6 +50,8 @@ internal static class Program
             if (!args.Contains("--background")) window.Show();
             if (args.Contains("--smoke"))
             {
+                if (args.Contains("--settings")) window.ShowSettings();
+                if (args.Contains("--small")) { window.Width = window.MinWidth; window.Height = window.MinHeight; }
                 // Isolated UI smoke check: no auto-connect, registry changes, or user data writes.
                 var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
                 timer.Tick += (_, _) =>

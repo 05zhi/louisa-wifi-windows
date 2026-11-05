@@ -13,4 +13,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
     & $DotNet run --project tests/LouisaWiFi.Windows.Tests -c Release
     if ($LASTEXITCODE -ne 0) { throw 'Windows tests failed' }
+    & $DotNet run --project tests/LouisaWiFi.App.Tests -c Release -- --smoke
+    if ($LASTEXITCODE -ne 0) { throw 'UI flow tests failed' }
 } finally { Pop-Location }
